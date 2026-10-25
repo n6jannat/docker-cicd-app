@@ -12,7 +12,7 @@
     "lint": "node --check src/app.js && node --check src/server.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^5.3.0"
   },
   "license": "MIT"
 }
