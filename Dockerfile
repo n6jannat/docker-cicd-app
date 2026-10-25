@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # ---- deps: install production dependencies only ----
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
 # ---- test: full install + run tests (used by CI with --target test) ----
-FROM node:22-alpine AS test
+FROM node:26-alpine AS test
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -15,7 +15,7 @@ COPY . .
 RUN npm run lint && npm test
 
 # ---- runtime: small, non-root image ----
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ARG APP_VERSION=dev
 ENV NODE_ENV=production \
     PORT=3000 \
