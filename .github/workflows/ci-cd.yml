@@ -102,7 +102,7 @@ jobs:
       matrix:
         node: ${{ fromJSON(needs.plan.outputs.node-matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -123,7 +123,7 @@ jobs:
     outputs:
       image: ${{ env.REGISTRY }}/${{ steps.lower.outputs.name }}:${{ needs.plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: lower
         run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
@@ -191,7 +191,7 @@ jobs:
       APP_ENV: ${{ needs.plan.outputs.environment }}
       HOST_PORT: ${{ vars.HOST_PORT || (needs.plan.outputs.environment == 'production' && '3000' || '3001') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Log in to GHCR
         shell: bash
@@ -218,7 +218,7 @@ jobs:
       name: ${{ needs.plan.outputs.environment }}
       url: ${{ vars.APP_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Copy compose file to server
         uses: appleboy/scp-action@v0.1.7
