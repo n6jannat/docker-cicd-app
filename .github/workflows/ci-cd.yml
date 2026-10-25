@@ -175,11 +175,44 @@ jobs:
           docker logs smoke; exit 1
 
   # ------------------------------------------------------------------
-  # 4. Deploy to the dynamically chosen environment.
+  # 4a. Deploy to YOUR LOCAL MACHINE (default).
+  #     Runs on a self-hosted runner installed on that machine, so no
+  #     inbound SSH/ports are needed. See README "Deploy to your local machine".
   # ------------------------------------------------------------------
-  deploy:
+  deploy-local:
     needs: [plan, build]
-    if: needs.plan.outputs.environment != ''
+    if: needs.plan.outputs.environment != '' && vars.DEPLOY_TARGET != 'ssh'
+    runs-on: [self-hosted, docker-cicd-app]
+    environment:
+      name: ${{ needs.plan.outputs.environment }}
+      url: http://localhost:${{ vars.HOST_PORT || (needs.plan.outputs.environment == 'production' && '3000' || '3001') }}
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      APP_ENV: ${{ needs.plan.outputs.environment }}
+      HOST_PORT: ${{ vars.HOST_PORT || (needs.plan.outputs.environment == 'production' && '3000' || '3001') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull image, restart, health check (auto-rollback)
+        shell: bash
+        working-directory: deploy
+        run: bash deploy.sh
+
+      - name: Show running container
+        if: always()
+        shell: bash
+        run: docker ps --filter "name=docker-cicd-app-${APP_ENV}"
+
+  # ------------------------------------------------------------------
+  # 4b. Deploy to a remote server over SSH (set repo variable DEPLOY_TARGET=ssh).
+  # ------------------------------------------------------------------
+  deploy-ssh:
+    needs: [plan, build]
+    if: needs.plan.outputs.environment != '' && vars.DEPLOY_TARGET == 'ssh'
     runs-on: ubuntu-latest
     environment:
       name: ${{ needs.plan.outputs.environment }}
