@@ -1,0 +1,227 @@
+name: CI/CD
+
+# One pipeline whose behaviour is computed at runtime ("dynamic") from the event:
+#   pull_request      -> test + build image (no push, no deploy)
+#   push to develop   -> test + build + push + deploy to "staging"
+#   push to main      -> test + build + push + deploy to "staging"
+#   tag v*.*.*        -> test + build + push + deploy to "production"
+#   workflow_dispatch -> deploy any branch to the environment you pick
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Decide what this run should do.
+  # ------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      node-matrix: ${{ steps.plan.outputs.node-matrix }}
+      push: ${{ steps.plan.outputs.push }}
+      environment: ${{ steps.plan.outputs.environment }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          ENVIRONMENT=""
+          PUSH=false
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            ENVIRONMENT="${{ inputs.environment }}"; PUSH=true
+          elif [[ "$REF" == refs/tags/v* ]]; then
+            ENVIRONMENT=production; PUSH=true
+          elif [[ "$EVENT" == "push" && ( "$REF" == "refs/heads/main" || "$REF" == "refs/heads/develop" ) ]]; then
+            ENVIRONMENT=staging; PUSH=true
+          fi
+
+          # Full Node matrix on PRs and releases; a single version otherwise for speed.
+          if [[ "$EVENT" == "pull_request" || "$REF" == refs/tags/v* ]]; then
+            MATRIX='["20","22","24"]'
+          else
+            MATRIX='["22"]'
+          fi
+
+          if [[ "$REF" == refs/tags/v* ]]; then
+            VERSION="${REF#refs/tags/}"
+          else
+            VERSION="sha-${GITHUB_SHA::7}"
+          fi
+
+          {
+            echo "node-matrix=$MATRIX"
+            echo "push=$PUSH"
+            echo "environment=$ENVIRONMENT"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Pipeline plan"
+            echo "| key | value |"
+            echo "|---|---|"
+            echo "| event | $EVENT |"
+            echo "| node matrix | $MATRIX |"
+            echo "| push image | $PUSH |"
+            echo "| deploy to | ${ENVIRONMENT:-none} |"
+            echo "| version | $VERSION |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------
+  # 2. Lint + test on a dynamic Node matrix.
+  # ------------------------------------------------------------------
+  test:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(needs.plan.outputs.node-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  # ------------------------------------------------------------------
+  # 3. Build the Docker image (and push it to GHCR when planned).
+  # ------------------------------------------------------------------
+  build:
+    needs: [plan, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ env.REGISTRY }}/${{ steps.lower.outputs.name }}:${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: lower
+        run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - if: needs.plan.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.lower.outputs.name }}
+          tags: |
+            type=raw,value=${{ needs.plan.outputs.version }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: ${{ needs.plan.outputs.push == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ needs.plan.outputs.push == 'true' }}
+          load: ${{ needs.plan.outputs.push != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: APP_VERSION=${{ needs.plan.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Smoke-test the built image on PRs (image was loaded locally).
+      - if: needs.plan.outputs.push != 'true'
+        run: |
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          docker run -d --name smoke -p 3000:3000 "$IMAGE"
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:3000/health && exit 0
+            sleep 1
+          done
+          docker logs smoke; exit 1
+
+  # ------------------------------------------------------------------
+  # 4. Deploy to the dynamically chosen environment.
+  # ------------------------------------------------------------------
+  deploy:
+    needs: [plan, build]
+    if: needs.plan.outputs.environment != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.plan.outputs.environment }}
+      url: ${{ vars.APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy compose file to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: deploy/docker-compose.prod.yml,deploy/deploy.sh
+          target: ~/docker-cicd-app-${{ needs.plan.outputs.environment }}
+          strip_components: 1
+
+      - name: Pull image and restart
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          APP_ENV: ${{ needs.plan.outputs.environment }}
+          HOST_PORT: ${{ vars.HOST_PORT || '3000' }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: IMAGE,APP_ENV,HOST_PORT,GHCR_USER,GHCR_TOKEN
+          script: |
+            cd ~/docker-cicd-app-$APP_ENV
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            bash deploy.sh
+
+      - name: Smoke test
+        if: vars.APP_URL != ''
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS "${{ vars.APP_URL }}/health" && exit 0
+            sleep 2
+          done
+          echo "Health check failed"; exit 1

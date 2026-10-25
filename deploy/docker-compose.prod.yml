@@ -1,0 +1,15 @@
+# Used on the deployment server. IMAGE, APP_ENV and HOST_PORT come from the CD job.
+services:
+  app:
+    image: ${IMAGE}
+    container_name: docker-cicd-app-${APP_ENV}
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      APP_ENV: ${APP_ENV}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

@@ -1,0 +1,11 @@
+# Local development: docker compose up --build
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "3000:3000"
+    environment:
+      APP_ENV: local
+    restart: unless-stopped
